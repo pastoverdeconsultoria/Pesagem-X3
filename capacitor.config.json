@@ -1,0 +1,8 @@
+{
+  "appId": "br.com.pastoverde.pesagem",
+  "appName": "Pesagem PV",
+  "webDir": "dist",
+  "android": {
+    "allowMixedContent": false
+  }
+}

@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Pesagem PV</string>
+    <string name="title_activity_main">Pesagem PV</string>
+    <string name="package_name">br.com.pastoverde.pesagem</string>
+    <string name="custom_url_scheme">br.com.pastoverde.pesagem</string>
+</resources>
