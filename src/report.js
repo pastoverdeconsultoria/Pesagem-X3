@@ -110,13 +110,13 @@ export function gerarPDF(sessao) {
   // ---- Tabela ----
   y = secao('Detalhamento', y + 2);
   const head = individual
-    ? [['Nº', 'Brinco', 'Peso (kg)', 'Hora', 'Origem']]
+    ? [['Nº', 'Número', 'Chip (brinco eletrônico)', 'Peso (kg)', 'Hora']]
     : [['Pesagem', 'Hora', 'Animais', 'Peso (kg)', 'Média/animal']];
   const body = individual
-    ? sessao.registros.map((r, i) => [String(i + 1), fmtBrinco(r.brinco), fmt1(r.peso), hora(r.ts), r.manual ? 'manual' : 'bastão'])
+    ? sessao.registros.map((r, i) => [String(i + 1), r.numero || '—', r.brinco ? fmtBrinco(r.brinco) : '—', fmt1(r.peso) + (r.subst ? '*' : ''), hora(r.ts)])
     : sessao.registros.map((r, i) => [`#${i + 1}`, hora(r.ts), String(r.qtd), fmt1(r.peso), fmt1(r.peso / r.qtd)]);
   const foot = individual
-    ? [['', `${st.nAnimais} animais`, fmt1(st.pesoTotal), 'Média', fmt1(st.media)]]
+    ? [['', `${st.nAnimais} animais`, `Média ${fmt1(st.media)} kg`, fmt1(st.pesoTotal), '']]
     : [['Total', '—', String(st.nAnimais), fmt1(st.pesoTotal), fmt1(st.media)]];
 
   autoTable(doc, {
@@ -127,11 +127,11 @@ export function gerarPDF(sessao) {
     headStyles: { fillColor: [240, 238, 231], textColor: VERDE, fontStyle: 'bold', fontSize: 7.5 },
     footStyles: { fillColor: [240, 238, 231], textColor: TINTA, fontStyle: 'bold' },
     columnStyles: individual
-      ? { 0: { halign: 'left' }, 1: { halign: 'left' }, 2: { halign: 'right' }, 3: { halign: 'right' }, 4: { halign: 'right' } }
+      ? { 0: { halign: 'left', cellWidth: 12 }, 1: { halign: 'left', fontStyle: 'bold' }, 2: { halign: 'left' }, 3: { halign: 'right' }, 4: { halign: 'right' } }
       : { 0: { halign: 'left' }, 1: { halign: 'right' }, 2: { halign: 'right' }, 3: { halign: 'right' }, 4: { halign: 'right' } },
     didParseCell: d => {
       if (d.section !== 'body') {
-        const al = d.table.columns[d.column.index] && d.column.index > (individual ? 1 : 0) ? 'right' : 'left';
+        const al = d.column.index > (individual ? 2 : 0) ? 'right' : 'left';
         d.cell.styles.halign = al;
       }
     }
@@ -140,7 +140,7 @@ export function gerarPDF(sessao) {
 
   // ---- Nota ----
   const nota = individual
-    ? '* Arroba estimada com rendimento de carcaça de 50% (peso vivo ÷ 30). Rendimento real varia com acabamento e categoria. Peso vivo de curral sofre efeito de enchimento (trato/água); sem jejum, tende a ficar acima do peso de balança comercial.'
+    ? '* Arroba estimada com rendimento de carcaça de 50% (peso vivo ÷ 30). Peso com asterisco: substituído por nova pesagem na mesma sessão. Rendimento real varia com acabamento e categoria. Peso vivo de curral sofre efeito de enchimento (trato/água); sem jejum, tende a ficar acima do peso de balança comercial.'
     : '* Arroba estimada com rendimento de carcaça de 50% (peso vivo ÷ 30). Pesagem em grupo: o CV é calculado entre pesagens e subestima a variação individual real do lote. Para uniformidade e GMD por animal, use a pesagem individual.';
   doc.setFontSize(7.8); doc.setFont('helvetica', 'normal');
   const linhas = doc.splitTextToSize(nota, W - 2 * M - 8);

@@ -2,7 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   decodeS3, parseBrinco, fmtBrinco, LineSplitter, Estabilidade,
-  estatisticas, faixas, gerarCSV, fmt1
+  estatisticas, faixas, gerarCSV, fmt1,
+  vincular, liberarChip, numeroDoChip, chipDoNumero, ativos, ehChip
 } from '../src/logic.js';
 
 const dv = bytes => new DataView(Uint8Array.from(bytes).buffer);
@@ -71,9 +72,30 @@ test('estatísticas individuais', () => {
 
 test('CSV tem cabeçalho, linhas e total', () => {
   const s = { modo: 'individual', cliente: 'Faz. Teste', lote: 'L1', data: '2026-11-10',
-    registros: [{ brinco: '982000445531509', peso: 401.5, ts: 0, manual: false }] };
+    registros: [{ brinco: '982000445531509', numero: '1234', peso: 401.5, ts: 0, manual: false }] };
   const csv = gerarCSV(s);
   assert.ok(csv.startsWith('﻿Cliente/Fazenda;Faz. Teste'));
-  assert.ok(csv.includes('1;982000445531509;401,5;'));
-  assert.ok(csv.includes('TOTAL;1 animais;401,5'));
+  assert.ok(csv.includes('1;1234;982000445531509;401,5;'));
+  assert.ok(csv.includes('TOTAL;1 animais;;401,5'));
+});
+
+test('chip ↔ número: vincular, conflito, reaproveitar, histórico', () => {
+  const A = '982000445531509', B = '982000111222333';
+  let v = [];
+  let r = vincular(v, 'Fazenda Lago Azul', A, ' 1234 ', 100); assert.ok(r.ok); v = r.vinc;
+  assert.equal(numeroDoChip(v, 'fazenda lago  azul', A), '1234');          // nome da fazenda normalizado
+  assert.equal(chipDoNumero(v, 'Fazenda Lago Azul', '1234'), A);
+  assert.equal(numeroDoChip(v, 'Outra Fazenda', A), null);                  // por fazenda
+  r = vincular(v, 'Fazenda Lago Azul', B, '1234', 200);                     // número já usado
+  assert.equal(r.ok, false); assert.equal(r.conflito.chip, A);
+  r = vincular(v, 'Outra Fazenda', B, '1234', 200); assert.ok(r.ok);         // outra fazenda pode
+  v = liberarChip(v, 'Fazenda Lago Azul', A, 300);                          // reaproveitar
+  assert.equal(numeroDoChip(v, 'Fazenda Lago Azul', A), null);
+  assert.equal(v.length, 1); assert.equal(v[0].ate, 300);                   // histórico guardado
+  r = vincular(v, 'Fazenda Lago Azul', A, '5678', 400); v = r.vinc;
+  assert.equal(numeroDoChip(v, 'Fazenda Lago Azul', A), '5678');
+  r = vincular(v, 'Fazenda Lago Azul', A, '9999', 500); v = r.vinc;          // editar número
+  assert.equal(numeroDoChip(v, 'Fazenda Lago Azul', A), '9999');
+  assert.equal(ativos(v, 'Fazenda Lago Azul').length, 1);
+  assert.ok(ehChip('982 000445531509')); assert.ok(!ehChip('1234'));
 });

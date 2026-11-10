@@ -134,14 +134,51 @@ export function gerarCSV(sessao) {
       L.push(`${i + 1};${hora(r.ts)};${r.qtd};${fmt1(r.peso)};${fmt1(r.peso / r.qtd)}`));
     L.push(`TOTAL;;${st.nAnimais};${fmt1(st.pesoTotal)};${fmt1(st.media)}`);
   } else {
-    L.push('N;Brinco;Peso_kg;Hora;Origem');
+    L.push('N;Numero_fazenda;Chip;Peso_kg;Hora;Origem');
     sessao.registros.forEach((r, i) =>
-      L.push(`${i + 1};${r.brinco};${fmt1(r.peso)};${hora(r.ts)};${r.manual ? 'manual' : 'automatico'}`));
-    L.push(`TOTAL;${st.nAnimais} animais;${fmt1(st.pesoTotal)};;`);
-    L.push(`MEDIA;;${fmt1(st.media)};;`);
+      L.push(`${i + 1};${r.numero || ''};${r.brinco || ''};${fmt1(r.peso)};${hora(r.ts)};${r.manual ? 'digitado' : 'bastao'}${r.subst ? ' (substituido)' : ''}`));
+    L.push(`TOTAL;${st.nAnimais} animais;;${fmt1(st.pesoTotal)};;`);
+    L.push(`MEDIA;;;${fmt1(st.media)};;`);
   }
   return '﻿' + L.join('\r\n') + '\r\n';
 }
+
+// ---------- Chip ↔ número da fazenda ----------
+// Lista de vínculos: { fazenda, chip, numero, desde, ate }  (ate = null → ativo).
+// Reaproveitar um brinco encerra o vínculo (ate = data); o histórico fica.
+export const chaveFazenda = s => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '')
+  .toLowerCase().replace(/\s+/g, ' ').trim();
+export const normNumero = s => String(s || '').trim().replace(/\s+/g, '').toUpperCase();
+export const ehChip = s => /^\d{15}$/.test(String(s || '').replace(/[\s-]/g, ''));
+
+export function numeroDoChip(vinc, fazenda, chip) {
+  const f = chaveFazenda(fazenda);
+  return vinc.find(v => !v.ate && v.fazenda === f && v.chip === chip)?.numero || null;
+}
+export function chipDoNumero(vinc, fazenda, numero) {
+  const f = chaveFazenda(fazenda), n = normNumero(numero);
+  return vinc.find(v => !v.ate && v.fazenda === f && v.numero === n)?.chip || null;
+}
+export function ativos(vinc, fazenda) {
+  const f = chaveFazenda(fazenda);
+  return vinc.filter(v => !v.ate && v.fazenda === f);
+}
+// Retorna { ok, vinc } ou { ok:false, conflito:{chip} } se o número já está em outro chip ativo.
+export function vincular(vinc, fazenda, chip, numero, agora = Date.now()) {
+  const f = chaveFazenda(fazenda), n = normNumero(numero);
+  if (!n) return { ok: false, erro: 'Número vazio' };
+  const outro = vinc.find(v => !v.ate && v.fazenda === f && v.numero === n && v.chip !== chip);
+  if (outro) return { ok: false, conflito: { chip: outro.chip } };
+  const novo = vinc.map(v => (!v.ate && v.fazenda === f && v.chip === chip) ? { ...v, ate: agora } : v);
+  novo.push({ fazenda: f, chip, numero: n, desde: agora, ate: null });
+  return { ok: true, vinc: novo };
+}
+export function liberarChip(vinc, fazenda, chip, agora = Date.now()) {
+  const f = chaveFazenda(fazenda);
+  return vinc.map(v => (!v.ate && v.fazenda === f && v.chip === chip) ? { ...v, ate: agora } : v);
+}
+// Identidade do animal dentro de uma sessão (para detectar repetição)
+export const idAnimal = r => (r.brinco ? 'C:' + r.brinco : 'N:' + normNumero(r.numero));
 
 // ---------- Sessões ----------
 export function novaSessao({ modo, cliente, lote, data }) {

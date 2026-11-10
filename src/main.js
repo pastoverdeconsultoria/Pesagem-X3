@@ -6,37 +6,43 @@ import { KeepAwake } from '@capacitor-community/keep-awake';
 import { Balanca, Bastao } from './devices.js';
 import {
   Estabilidade, estatisticas, novaSessao, parseBrinco, fmtBrinco,
-  fmt1, fmt0, parseNum, hora, dataBR, gerarCSV
+  fmt1, fmt0, parseNum, hora, dataBR, gerarCSV,
+  chaveFazenda, normNumero, ehChip, numeroDoChip, chipDoNumero, ativos,
+  vincular, liberarChip
 } from './logic.js';
 import { gerarPDF, nomeArquivo } from './report.js';
 
 // ================== Estado ==================
 const CHAVE = 'pesagem.sessoes.v1';
+const CHAVE_VINC = 'pesagem.brincos.v1';
 const nativo = Capacitor.isNativePlatform();
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
-function carregar() { try { return JSON.parse(localStorage.getItem(CHAVE)) || []; } catch { return []; } }
+function ler(chave) { try { return JSON.parse(localStorage.getItem(chave)) || []; } catch { return []; } }
 function salvar() { try { localStorage.setItem(CHAVE, JSON.stringify(S.sessoes)); } catch { toast('Erro ao salvar no celular'); } }
+function salvarVinc() { try { localStorage.setItem(CHAVE_VINC, JSON.stringify(S.vinc)); } catch { toast('Erro ao salvar no celular'); } }
 
 const hoje = () => {
   const d = new Date(); d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
   return d.toISOString().slice(0, 10);
 };
+const dataCurta = ts => new Date(ts).toLocaleDateString('pt-BR');
 
 const S = {
   tela: 'inicio',
-  sessoes: carregar(),
-  atual: null,               // sessão aberta
+  sessoes: ler(CHAVE),
+  vinc: ler(CHAVE_VINC),       // chip ↔ número da fazenda
+  atual: null,                 // sessão aberta
   modoNovo: 'individual',
   pesoVivo: null, pesoTs: 0,
-  pesoEditado: false,        // operador digitou o peso (não sobrescrever com o vivo)
-  pendente: null,            // brinco lido aguardando peso
-  ultimoPeriodoUsado: -1,    // período de peso já usado num registro
-  dup: null,                 // { brinco, idx } brinco repetido aguardando decisão
-  auto: localStorage.getItem('pref.auto') !== '0',
+  pesoEditado: false,          // lote: operador digitou o peso
+  pend: null,                  // animal identificado aguardando registro { chip, numero, origem }
+  dup: null,                   // { idx, pend } animal já pesado nesta sessão
+  ultimoPeriodoUsado: -1,      // período de peso já usado no último registro
   ultimaLinha: '',
-  balancaMsg: '', bastaoMsg: ''
+  balancaMsg: '', bastaoMsg: '',
+  fazBrincos: '', buscaBrincos: ''
 };
 
 const est = new Estabilidade({ tol: 1.0, holdMs: 1500, minKg: 15 });
@@ -49,10 +55,7 @@ const balanca = new Balanca({
 
 const bastao = new Bastao({
   onLinha: l => { S.ultimaLinha = l; const el = $('ultimaLinha'); if (el) el.textContent = l; },
-  onBrinco: linha => {
-    const b = parseBrinco(linha);
-    if (b) brincoLido(b);
-  },
+  onBrinco: linha => { const b = parseBrinco(linha); if (b) chipLido(b, 'bastao'); },
   onEstado: (e, msg) => { S.bastaoMsg = msg; atualizaEquip(); }
 });
 
@@ -76,31 +79,46 @@ function toast(msg, ms = 2600) {
 
 // ================== Navegação ==================
 function irInicio() {
-  S.tela = 'inicio'; S.atual = null; S.pendente = null; S.dup = null;
+  S.tela = 'inicio'; S.atual = null; S.pend = null; S.dup = null;
   if (nativo) KeepAwake.allowSleep().catch(() => {});
   render();
 }
 function abrirSessao(id) {
   S.atual = S.sessoes.find(s => s.id === id);
   if (!S.atual) return;
-  S.tela = 'sessao'; S.pendente = null; S.dup = null; S.pesoEditado = false;
+  S.tela = 'sessao'; S.pend = null; S.dup = null; S.pesoEditado = false;
   S.ultimoPeriodoUsado = est.inicioPeriodo();
   if (nativo) KeepAwake.keepAwake().catch(() => {});
   render();
   if (balanca.estado === 'desconectado') balanca.autoConectar();
   if (S.atual.modo === 'individual' && bastao.estado === 'desconectado') bastao.autoConectar();
 }
+function abrirBrincos(fazenda) {
+  S.tela = 'brincos';
+  S.fazBrincos = fazenda ?? (S.fazBrincos || localStorage.getItem('ult.cliente') || '');
+  S.buscaBrincos = '';
+  render();
+}
 
 // ================== Render ==================
 function render() {
   fecharFolha();
-  $('app').innerHTML = S.tela === 'inicio' ? telaInicio() : telaSessao();
-  if (S.tela === 'sessao') { atualizaEquip(); atualizaPeso(); atualizaIndividual(); }
+  $('app').innerHTML = S.tela === 'inicio' ? telaInicio() : S.tela === 'brincos' ? telaBrincos() : telaSessao();
+  if (S.tela === 'sessao') { atualizaEquip(); atualizaPeso(); atualizaIdent(); }
+  if (S.tela === 'brincos') atualizaListaBrincos();
+}
+
+function clientesConhecidos() {
+  const vistos = new Map();
+  [...S.sessoes].sort((a, b) => b.criadaEm.localeCompare(a.criadaEm))
+    .forEach(s => { const k = chaveFazenda(s.cliente); if (k && !vistos.has(k)) vistos.set(k, s.cliente); });
+  return [...vistos.values()];
 }
 
 function telaInicio() {
   const abertas = S.sessoes.filter(s => !s.finalizada);
   const lista = [...S.sessoes].sort((a, b) => b.criadaEm.localeCompare(a.criadaEm));
+  const nVinc = S.vinc.filter(v => !v.ate).length;
   return `
   <div class="topo"><h1><span class="marca">Pasto Verde Consultoria</span><br>Pesagem</h1></div>
 
@@ -118,18 +136,21 @@ function telaInicio() {
   <div class="card">
     <h2>Nova pesagem</h2>
     <label class="rot">Cliente / Fazenda</label>
-    <input class="txt" id="nCliente" placeholder="Ex.: Fazenda Lago Azul" value="${esc(localStorage.getItem('ult.cliente') || '')}">
+    <input class="txt" id="nCliente" list="lsClientes" placeholder="Ex.: Fazenda Lago Azul" value="${esc(localStorage.getItem('ult.cliente') || '')}">
+    <datalist id="lsClientes">${clientesConhecidos().map(c => `<option value="${esc(c)}">`).join('')}</datalist>
     <label class="rot">Lote / Piquete</label>
     <input class="txt" id="nLote" placeholder="Ex.: Lote 3 — Piquete 12">
     <label class="rot">Data</label>
     <input class="txt" id="nData" type="date" value="${hoje()}">
     <label class="rot">Modo</label>
     <div class="modos">
-      <button class="modo ${S.modoNovo === 'individual' ? 'on' : ''}" data-acao="modo" data-modo="individual"><b>Individual</b><span>brinco + peso<br>(bastão)</span></button>
+      <button class="modo ${S.modoNovo === 'individual' ? 'on' : ''}" data-acao="modo" data-modo="individual"><b>Individual</b><span>brinco + peso<br>(bastão ou digitado)</span></button>
       <button class="modo ${S.modoNovo === 'lote' ? 'on' : ''}" data-acao="modo" data-modo="lote"><b>Lote</b><span>grupo + quantidade<br>(média)</span></button>
     </div>
     <button class="btn" style="margin-top:14px" data-acao="iniciar">Iniciar pesagem</button>
   </div>
+
+  <button class="dev-opt" data-acao="brincos"><span>Brincos — chip ↔ número da fazenda<small>${nVinc} chip${nVinc === 1 ? '' : 's'} cadastrado${nVinc === 1 ? '' : 's'} · editar e reaproveitar</small></span><span style="color:var(--ouro);font-size:22px">›</span></button>
 
   <div class="card">
     <h2>Sessões salvas</h2>
@@ -150,6 +171,47 @@ function resumoCurto(s) {
   return st.nAnimais ? `${st.nAnimais} an · méd ${fmt1(st.media)} kg` : 'sem registros';
 }
 
+// ---------- Tela Brincos ----------
+function telaBrincos() {
+  const clientes = clientesConhecidos();
+  return `
+  <div class="topo">
+    <button class="btn-ic" data-acao="voltar">←</button>
+    <h1>Brincos<small>chip ↔ número da fazenda</small></h1>
+  </div>
+  <div class="card">
+    <label class="rot" style="margin-top:0">Fazenda</label>
+    <input class="txt" id="bFaz" list="lsClientesB" value="${esc(S.fazBrincos)}" placeholder="Cliente / Fazenda">
+    <datalist id="lsClientesB">${clientes.map(c => `<option value="${esc(c)}">`).join('')}</datalist>
+    <label class="rot">Buscar número ou chip</label>
+    <input class="txt mono" id="bBusca" inputmode="numeric" placeholder="Ex.: 1234" value="${esc(S.buscaBrincos)}">
+  </div>
+  <div class="card">
+    <h2 id="bTitulo">Chips cadastrados</h2>
+    <div class="lista" id="bLista"></div>
+  </div>
+  <p class="rodape">O número é pedido na primeira leitura de cada chip.<br><b>Reaproveitar</b> libera o chip para outro animal; pesagens antigas continuam com o número da época.</p>`;
+}
+
+function natural(a, b) { return String(a).localeCompare(String(b), 'pt-BR', { numeric: true }); }
+
+function atualizaListaBrincos() {
+  const l = $('bLista'); if (!l) return;
+  const busca = normNumero(S.buscaBrincos);
+  const lista = ativos(S.vinc, S.fazBrincos)
+    .filter(v => !busca || v.numero.includes(busca) || v.chip.includes(busca))
+    .sort((a, b) => natural(a.numero, b.numero));
+  $('bTitulo').textContent = `Chips cadastrados (${lista.length})`;
+  l.innerHTML = lista.length ? lista.map(v => `
+    <div class="item">
+      <div class="meio"><div class="p" style="font-size:17px;color:var(--ouro)">${esc(v.numero)}</div>
+        <div class="q mono">${fmtBrinco(v.chip)} · desde ${dataCurta(v.desde)}</div></div>
+      <button class="btn sec peq" style="width:auto;padding:9px 12px" data-acao="vincEditar" data-chip="${v.chip}">Editar</button>
+      <button class="btn perigo peq" style="width:auto;padding:9px 12px" data-acao="vincLiberar" data-chip="${v.chip}">Reaproveitar</button>
+    </div>`).join('') : `<div class="vazio">${S.fazBrincos ? 'Nenhum chip cadastrado nesta fazenda' : 'Escolha a fazenda'}</div>`;
+}
+
+// ---------- Tela da sessão ----------
 function telaSessao() {
   const s = S.atual, ind = s.modo === 'individual';
   return `
@@ -185,19 +247,16 @@ function telaSessao() {
 function blocoIndividual() {
   return `
   <div class="card">
-    <div class="brinco-box" id="brincoBox"><div class="b" id="brincoTxt">—</div><div class="s" id="brincoSub">Leia o brinco com o bastão</div></div>
+    <div class="brinco-box" id="brincoBox">
+      <div class="b" id="identNum">—</div>
+      <div class="s" id="identSub">Leia o chip com o bastão ou digite abaixo</div>
+    </div>
+    <div class="stepper-row" style="margin-top:10px">
+      <input class="txt mono" id="inIdent" inputmode="numeric" enterkeyhint="go" placeholder="Número do animal ou chip" autocomplete="off">
+      <button class="btn sec peq" style="width:auto;padding:0 18px" data-acao="identDigitado">OK</button>
+    </div>
     <p class="passo" id="passo" style="margin-top:10px"></p>
-    <div class="toggle" style="margin-top:10px"><span>Registrar sozinho quando o peso estabilizar</span>
-      <input type="checkbox" id="chkAuto" ${S.auto ? 'checked' : ''}></div>
-    <details style="margin-top:10px">
-      <summary style="font-size:13px;color:var(--sub)">Entrada manual (sem bastão / brinco perdido)</summary>
-      <label class="rot">Brinco</label>
-      <input class="txt mono" id="inBrinco" inputmode="numeric" placeholder="982 000…">
-      <label class="rot">Peso (kg)</label>
-      <input class="grande" id="inPesoInd" inputmode="decimal" placeholder="0,0">
-      <button class="btn sec peq" style="margin-top:10px" data-acao="regManual">Registrar manualmente</button>
-    </details>
-    <button class="btn" style="margin-top:12px" id="btnRegAgora" data-acao="regAgora">Registrar agora</button>
+    <button class="btn" style="margin-top:8px" id="btnReg" data-acao="registrar">Registrar</button>
   </div>`;
 }
 
@@ -219,6 +278,11 @@ function blocoLote() {
 // ---------- atualizações parciais (sem redesenhar a tela) ----------
 const ROT = { conectado: 'Conectado', conectando: 'Conectando…', desconectado: 'Toque p/ conectar', erro: 'Falhou — tocar' };
 
+function descAnimal(a) {
+  if (!a) return '';
+  return a.numero ? `Nº ${a.numero}` : a.chip ? fmtBrinco(a.chip) : '';
+}
+
 function atualizaEquip() {
   if (S.tela !== 'sessao') return;
   const bal = $('eqBal');
@@ -236,16 +300,18 @@ function atualizaEquip() {
   if (S.atual?.modo === 'individual' && bastao.estado === 'erro' && S.bastaoMsg) al.push(`<div class="alerta erro">${esc(S.bastaoMsg)}</div>`);
   if (S.dup) {
     const r = S.atual.registros[S.dup.idx];
-    al.push(`<div class="alerta aviso"><b>Brinco já pesado nesta sessão</b><br>${fmtBrinco(S.dup.brinco)} — ${fmt1(r.peso)} kg às ${hora(r.ts)}
-      <div class="linha-btn" style="margin-top:9px"><button class="btn peq" data-acao="dupSubst">Substituir pelo peso atual</button><button class="btn sec peq" data-acao="dupIgnorar">Ignorar</button></div></div>`);
+    al.push(`<div class="alerta aviso"><b>Animal já pesado nesta sessão</b><br>${esc(descAnimal({ numero: r.numero, chip: r.brinco }))} — ${fmt1(r.peso)} kg às ${hora(r.ts)}
+      <div class="linha-btn" style="margin-top:9px"><button class="btn peq" data-acao="dupSubst">Substituir pelo peso atual</button><button class="btn sec peq" data-acao="dupManter">Manter peso anterior</button></div></div>`);
   }
   const box = $('alertas'); if (box) box.innerHTML = al.join('');
 }
 
+function semSinal() { return !S.pesoTs || Date.now() - S.pesoTs > 8000 || balanca.estado !== 'conectado'; }
+
 function atualizaPeso() {
   if (S.tela !== 'sessao') return;
   const el = $('peso');
-  const velho = !S.pesoTs || Date.now() - S.pesoTs > 8000 || balanca.estado !== 'conectado';
+  const velho = semSinal();
   if (S.pesoVivo !== null) el.innerHTML = fmt1(S.pesoVivo) + '<span class="un">kg</span>';
   el.classList.toggle('velho', velho);
   const e = $('estab'), ok = !velho && est.estavel();
@@ -254,30 +320,39 @@ function atualizaPeso() {
   if (S.atual.modo === 'lote') {
     const inp = $('inPeso');
     if (inp && !S.pesoEditado && S.pesoVivo !== null && document.activeElement !== inp) inp.value = fmt1(S.pesoVivo);
-  } else {
-    const inp = $('inPesoInd');
-    if (inp && document.activeElement !== inp && S.pesoVivo !== null) inp.value = fmt1(S.pesoVivo);
   }
-  atualizaIndividual();
+  atualizaPasso();
   atualizaTotais();
 }
 
-function atualizaIndividual() {
+function atualizaIdent() {
   if (S.tela !== 'sessao' || S.atual.modo !== 'individual') return;
   const box = $('brincoBox'); if (!box) return;
-  const p = S.pendente;
+  const p = S.pend;
   box.classList.toggle('lido', !!p);
-  $('brincoTxt').textContent = p ? fmtBrinco(p) : '—';
-  $('brincoSub').textContent = p ? 'Brinco lido' : 'Leia o brinco com o bastão';
-  const passo = $('passo');
-  const velho = !S.pesoTs || balanca.estado !== 'conectado';
-  if (!p) passo.innerHTML = 'Aguardando leitura do brinco';
-  else if (velho) passo.innerHTML = '<b>Balança sem sinal</b> — conecte ou use a entrada manual';
+  if (!p) {
+    $('identNum').textContent = '—';
+    $('identSub').textContent = 'Leia o chip com o bastão ou digite abaixo';
+  } else if (p.numero) {
+    $('identNum').textContent = 'Nº ' + p.numero;
+    $('identSub').innerHTML = p.chip ? `<span class="mono">${fmtBrinco(p.chip)}</span>` : 'sem chip';
+  } else {
+    $('identNum').textContent = fmtBrinco(p.chip);
+    $('identSub').innerHTML = `chip sem número · <a href="#" data-acao="atribuir" style="color:var(--ouro)">atribuir número</a>`;
+  }
+  atualizaPasso();
+}
+
+function atualizaPasso() {
+  if (S.tela !== 'sessao' || S.atual.modo !== 'individual') return;
+  const passo = $('passo'), btn = $('btnReg'); if (!passo) return;
+  const p = S.pend;
+  if (!p) passo.innerHTML = 'Aguardando identificação do animal';
+  else if (semSinal()) passo.innerHTML = '<b>Balança sem sinal</b> — conecte a balança';
   else if (!est.estavel()) passo.innerHTML = 'Aguardando o peso <b>estabilizar</b>…';
-  else if (est.inicioPeriodo() <= S.ultimoPeriodoUsado) passo.innerHTML = 'Peso ainda é do animal anterior — aguardando troca';
-  else passo.innerHTML = S.auto ? 'Registrando…' : 'Peso estável — toque em <b>Registrar agora</b>';
-  const btn = $('btnRegAgora');
-  if (btn) btn.disabled = !p || S.pesoVivo === null || S.pesoVivo <= 0;
+  else if (est.inicioPeriodo() <= S.ultimoPeriodoUsado) passo.innerHTML = 'Peso ainda é do animal anterior';
+  else passo.innerHTML = 'Peso estável — toque em <b>Registrar</b>';
+  if (btn) btn.disabled = !p || !(S.pesoVivo > 0) || semSinal();
 }
 
 function atualizaTotais() {
@@ -290,57 +365,120 @@ function atualizaTotais() {
     <div class="tot d"><div class="n">${fmt1(st.media)}</div><div class="l">Média kg/an</div></div>`;
   const l = $('lista');
   if (!l) return;
-  const sig = s.registros.length + ':' + (s.registros.at(-1)?.ts || 0) + ':' + (s.registros.at(-1)?.peso || 0);
+  const sig = s.registros.map(r => r.ts + ':' + r.peso + ':' + (r.numero || '')).join('|');
   if (l.dataset.sig === sig) return;
   l.dataset.sig = sig;
   if (!s.registros.length) { l.innerHTML = '<div class="vazio">Nenhum registro ainda</div>'; return; }
   l.innerHTML = s.registros.map((r, i) => ({ r, i })).reverse().map(({ r, i }) => ind ? `
     <div class="item"><span class="idx">#${i + 1}</span>
-      <div class="meio"><div class="p">${fmtBrinco(r.brinco)}</div><div class="q">${hora(r.ts)}${r.manual ? ' · manual' : ''}${r.subst ? ' · substituído' : ''}</div></div>
+      <div class="meio"><div class="p">${r.numero ? 'Nº ' + esc(r.numero) : '<span style="color:var(--sub)">sem número</span>'}</div>
+        <div class="q"><span class="mono">${r.brinco ? fmtBrinco(r.brinco) : 'sem chip'}</span> · ${hora(r.ts)}${r.subst ? ' · substituído' : ''}</div></div>
       <span class="val">${fmt1(r.peso)} kg</span><button class="x" data-acao="apagar" data-i="${i}">✕</button></div>` : `
     <div class="item"><span class="idx">#${i + 1}</span>
       <div class="meio"><div class="p">${r.qtd} an · ${fmt1(r.peso)} kg</div><div class="q">${hora(r.ts)}</div></div>
       <span class="val">${fmt1(r.peso / r.qtd)}</span><button class="x" data-acao="apagar" data-i="${i}">✕</button></div>`).join('');
 }
 
-// ================== Pesagem individual ==================
-function brincoLido(b) {
-  if (S.tela !== 'sessao' || S.atual.modo !== 'individual') { toast('Brinco lido: ' + fmtBrinco(b)); return; }
+// ================== Identificação do animal ==================
+function identificar(pend) {
   const regs = S.atual.registros;
-  const ult = regs.at(-1);
-  // releitura do mesmo animal ainda na balança: ignora em silêncio
-  if (b === S.pendente) return;
-  if (ult && ult.brinco === b && est.inicioPeriodo() <= S.ultimoPeriodoUsado) return;
-  const idx = regs.findIndex(r => r.brinco === b);
-  if (idx >= 0) { S.dup = { brinco: b, idx }; bip(500, 300); vibra(400); atualizaEquip(); return; }
-  if (S.pendente) toast('Brinco ' + fmtBrinco(S.pendente) + ' descartado (sem peso)');
-  S.pendente = b; S.dup = null;
-  bip(900, 80); vibra(80);
-  atualizaEquip(); atualizaIndividual();
+  // mesmo animal = mesmo chip, ou mesmo número da fazenda
+  const idx = regs.findIndex(r =>
+    (pend.chip && r.brinco === pend.chip) ||
+    (pend.numero && r.numero && normNumero(r.numero) === normNumero(pend.numero)));
+  if (idx >= 0) {
+    S.pend = null; S.dup = { idx, pend };
+    bip(500, 300); vibra(400);
+  } else {
+    S.pend = pend; S.dup = null;
+    bip(900, 80); vibra(80);
+  }
+  atualizaEquip(); atualizaIdent();
 }
 
-function registraIndividual(brinco, peso, manual) {
-  if (!brinco || !(peso > 0)) return;
-  S.atual.registros.push({ brinco, peso: Math.round(peso * 10) / 10, ts: Date.now(), manual });
+function chipLido(chip, origem) {
+  if (S.tela !== 'sessao' || S.atual.modo !== 'individual') {
+    if (S.tela !== 'sessao') toast('Chip lido: ' + fmtBrinco(chip));
+    return;
+  }
+  if (S.pend?.chip === chip || S.dup?.pend.chip === chip) return;           // releitura
+  const ult = S.atual.registros.at(-1);
+  if (ult?.brinco === chip && est.inicioPeriodo() <= S.ultimoPeriodoUsado) return; // ainda na balança
+  const numero = numeroDoChip(S.vinc, S.atual.cliente, chip);
+  if (numero) { identificar({ chip, numero, origem }); return; }
+  // chip novo nesta fazenda: pede o número
+  identificar({ chip, numero: '', origem });
+  if (S.pend) folhaNumero(chip);
+}
+
+function identDigitado() {
+  const inp = $('inIdent'); const v = inp.value.trim();
+  if (!v) return toast('Digite o número do animal ou do chip');
+  inp.value = ''; inp.blur();
+  const limpo = v.replace(/[\s-]/g, '');
+  if (ehChip(limpo)) { chipLido(limpo, 'digitado'); return; }
+  const numero = normNumero(v);
+  const chip = chipDoNumero(S.vinc, S.atual.cliente, numero);
+  identificar({ chip: chip || '', numero, origem: 'digitado' });
+}
+
+// Pede/edita o número da fazenda para um chip
+function folhaNumero(chip, { editar = false } = {}) {
+  const atual = numeroDoChip(S.vinc, editar ? S.fazBrincos : S.atual.cliente, chip) || '';
+  abrirFolha(`
+    <h3>${editar ? 'Editar número' : 'Chip novo nesta fazenda'}</h3>
+    <p>Chip <span class="mono">${fmtBrinco(chip)}</span>${editar ? '' : ' ainda não tem número cadastrado.'}</p>
+    <label class="rot" style="margin:0">Número do animal na fazenda</label>
+    <input class="grande" id="fNumero" inputmode="numeric" enterkeyhint="done" value="${esc(atual)}" autocomplete="off">
+    <div id="fConflito"></div>
+    <button class="btn" data-acao="numSalvar" data-chip="${chip}" data-editar="${editar ? 1 : ''}">Salvar</button>
+    <button class="btn sec peq" data-acao="fechar">${editar ? 'Cancelar' : 'Pular (pesar sem número)'}</button>`);
+  setTimeout(() => $('fNumero')?.focus(), 150);
+}
+
+function salvarNumero(chip, editar, mover = false) {
+  const numero = normNumero($('fNumero').value);
+  if (!numero) return toast('Digite o número');
+  const fazenda = editar ? S.fazBrincos : S.atual.cliente;
+  let r = vincular(S.vinc, fazenda, chip, numero);
+  if (!r.ok && r.conflito && mover) {
+    S.vinc = liberarChip(S.vinc, fazenda, r.conflito.chip);
+    r = vincular(S.vinc, fazenda, chip, numero);
+  }
+  if (!r.ok) {
+    if (r.conflito) {
+      $('fConflito').innerHTML = `<div class="alerta aviso">O número <b>${esc(numero)}</b> já está no chip <span class="mono">${fmtBrinco(r.conflito.chip)}</span>.
+        <div class="linha-btn" style="margin-top:9px"><button class="btn peq" data-acao="numMover" data-chip="${chip}" data-editar="${editar ? 1 : ''}">Passar o número para este chip</button></div>
+        <p style="margin-top:6px;font-size:12px">O chip antigo fica livre (como reaproveitado).</p></div>`;
+      return;
+    }
+    return toast(r.erro || 'Não salvou');
+  }
+  S.vinc = r.vinc; salvarVinc();
+  fecharFolha();
+  toast(`Chip ${fmtBrinco(chip).slice(-6)} = Nº ${numero}`);
+  if (editar) { atualizaListaBrincos(); return; }
+  if (S.pend?.chip === chip) { S.pend.numero = numero; identificar(S.pend); }
+}
+
+// ================== Registro ==================
+function registrar() {
+  const p = S.pend;
+  if (!p) return toast('Identifique o animal primeiro');
+  if (!(S.pesoVivo > 0) || semSinal()) return toast('Sem peso da balança');
+  if (!est.estavel() && !confirm('O peso ainda não estabilizou. Registrar mesmo assim?')) return;
+  if (est.inicioPeriodo() <= S.ultimoPeriodoUsado &&
+      !confirm('Esse peso é o mesmo do registro anterior (o animal anterior pode não ter saído). Registrar mesmo assim?')) return;
+  const peso = Math.round(S.pesoVivo * 10) / 10;
+  S.atual.registros.push({ brinco: p.chip || '', numero: p.numero || '', peso, ts: Date.now(), manual: p.origem === 'digitado' });
   S.ultimoPeriodoUsado = est.inicioPeriodo();
-  if (brinco === S.pendente) S.pendente = null;
+  S.pend = null;
   salvar();
   bip(1400, 150); vibra(250);
   const c = $('pesoCard'); if (c) { c.classList.remove('flash'); void c.offsetWidth; c.classList.add('flash'); }
-  toast(`✔ ${fmtBrinco(brinco)} — ${fmt1(peso)} kg`);
-  atualizaIndividual(); atualizaTotais();
+  toast(`✔ ${descAnimal(p)} — ${fmt1(peso)} kg`);
+  atualizaIdent(); atualizaTotais();
 }
-
-function verificaAuto() {
-  if (S.tela !== 'sessao' || S.atual.modo !== 'individual') return;
-  atualizaPeso();
-  if (!S.auto || !S.pendente || S.dup) return;
-  if (balanca.estado !== 'conectado' || Date.now() - S.pesoTs > 8000) return;
-  if (!est.estavel()) return;
-  if (est.inicioPeriodo() <= S.ultimoPeriodoUsado) return;
-  registraIndividual(S.pendente, est.peso, false);
-}
-setInterval(() => { if (S.tela === 'sessao') { if (S.atual.modo === 'individual') verificaAuto(); else atualizaPeso(); } }, 250);
 
 // ================== Folhas (equipamentos, finalizar, sessão) ==================
 function abrirFolha(html) { $('sheetBody').innerHTML = html; $('sheet').classList.add('on'); }
@@ -390,7 +528,7 @@ function folhaFinalizar() {
       <div class="tot d"><div class="n">${fmt1(st.media)}</div><div class="l">Média kg/an</div></div>
       <div class="tot"><div class="n">${fmt1(st.arroba)}</div><div class="l">@ média*</div></div>
       <div class="tot"><div class="n">${fmt1(st.cv)}%</div><div class="l">${ind ? 'CV' : 'CV entre pesagens'}</div></div>
-      <div class="tot"><div class="n">${ind ? fmt1(st.min) + '–' + fmt1(st.max) : st.registros}</div><div class="l">${ind ? 'Mín–Máx kg' : 'Pesagens'}</div></div>
+      <div class="tot"><div class="n">${ind ? fmt0(st.min) + '–' + fmt0(st.max) : st.registros}</div><div class="l">${ind ? 'Mín–Máx kg' : 'Pesagens'}</div></div>
     </div>
     <p style="font-size:12px">* arroba estimada com rendimento de 50% (peso vivo ÷ 30)</p>
     <button class="btn" data-acao="pdf" data-id="${s.id}" ${st.registros ? '' : 'disabled'}>Gerar relatório PDF</button>
@@ -454,6 +592,7 @@ const acoes = {
   opcoes: el => folhaOpcoes(el.dataset.id),
   voltar: () => irInicio(),
   fechar: () => fecharFolha(),
+  brincos: () => abrirBrincos(),
   excluir: el => {
     if (!confirm('Excluir esta sessão e todos os registros? Não dá para desfazer.')) return;
     S.sessoes = S.sessoes.filter(s => s.id !== el.dataset.id); salvar(); render();
@@ -467,6 +606,33 @@ const acoes = {
   basReconectar: async () => { fecharFolha(); try { await bastao.conectar(); toast('Bastão conectado'); } catch { /* aviso */ } },
   basDesconectar: async () => { fecharFolha(); await bastao.desconectar(); },
   basAndroid: () => bastao.abrirBluetoothAndroid(),
+  // individual
+  identDigitado: () => identDigitado(),
+  atribuir: () => { if (S.pend?.chip) folhaNumero(S.pend.chip); },
+  numSalvar: el => salvarNumero(el.dataset.chip, !!el.dataset.editar),
+  numMover: el => salvarNumero(el.dataset.chip, !!el.dataset.editar, true),
+  registrar: () => registrar(),
+  dupSubst: () => {
+    const r = S.atual.registros[S.dup.idx];
+    if (!(S.pesoVivo > 0) || semSinal()) return toast('Sem peso da balança');
+    if (!est.estavel() && !confirm('O peso ainda não estabilizou. Substituir mesmo assim?')) return;
+    r.peso = Math.round(S.pesoVivo * 10) / 10; r.ts = Date.now(); r.subst = true;
+    if (!r.numero && S.dup.pend.numero) r.numero = S.dup.pend.numero;
+    S.ultimoPeriodoUsado = est.inicioPeriodo();
+    S.dup = null; salvar(); bip(1400, 150); vibra(250);
+    toast(`✔ ${descAnimal({ numero: r.numero, chip: r.brinco })} atualizado — ${fmt1(r.peso)} kg`);
+    atualizaEquip(); atualizaTotais();
+  },
+  dupManter: () => { S.dup = null; toast('Peso anterior mantido'); atualizaEquip(); atualizaIdent(); },
+  // brincos
+  vincEditar: el => folhaNumero(el.dataset.chip, { editar: true }),
+  vincLiberar: el => {
+    const n = numeroDoChip(S.vinc, S.fazBrincos, el.dataset.chip);
+    if (!confirm(`Reaproveitar o chip do Nº ${n}?\n\nO chip fica livre e, na próxima leitura, o app pede o número do novo animal. As pesagens antigas continuam com o Nº ${n}.`)) return;
+    S.vinc = liberarChip(S.vinc, S.fazBrincos, el.dataset.chip); salvarVinc();
+    toast('Chip liberado para reaproveitar'); atualizaListaBrincos();
+  },
+  // lote
   qtd: el => { const i = $('inQtd'); i.value = Math.max(0, (parseInt(i.value) || 0) + parseInt(el.dataset.d)); },
   regLote: () => {
     const peso = parseNum($('inPeso').value), qtd = parseInt($('inQtd').value) || 0;
@@ -478,35 +644,9 @@ const acoes = {
     toast(`✔ ${qtd} animais — ${fmt1(peso)} kg (méd ${fmt1(peso / qtd)})`);
     atualizaPeso();
   },
-  regAgora: () => {
-    if (!S.pendente) return toast('Leia o brinco primeiro');
-    if (!(S.pesoVivo > 0)) return toast('Sem peso da balança');
-    if (!est.estavel() && !confirm('O peso ainda não estabilizou. Registrar mesmo assim?')) return;
-    registraIndividual(S.pendente, S.pesoVivo, false);
-  },
-  regManual: () => {
-    const b = parseBrinco($('inBrinco').value) || $('inBrinco').value.replace(/\D/g, '');
-    const p = parseNum($('inPesoInd').value);
-    if (!b) return toast('Informe o brinco');
-    if (!(p > 0)) return toast('Informe o peso');
-    if (S.atual.registros.some(r => r.brinco === b) && !confirm('Esse brinco já foi pesado nesta sessão. Registrar de novo?')) return;
-    registraIndividual(b, p, true);
-    $('inBrinco').value = '';
-  },
-  dupSubst: () => {
-    const r = S.atual.registros[S.dup.idx];
-    if (!(S.pesoVivo > 0)) return toast('Sem peso da balança');
-    r.peso = Math.round(S.pesoVivo * 10) / 10; r.ts = Date.now(); r.subst = true;
-    S.ultimoPeriodoUsado = est.inicioPeriodo();
-    S.dup = null; salvar(); bip(1400, 150); vibra(250);
-    toast(`✔ ${fmtBrinco(r.brinco)} atualizado — ${fmt1(r.peso)} kg`);
-    atualizaEquip(); atualizaTotais();
-    $('lista').dataset.sig = ''; atualizaTotais();
-  },
-  dupIgnorar: () => { S.dup = null; atualizaEquip(); },
   apagar: el => {
     const i = +el.dataset.i, r = S.atual.registros[i];
-    const desc = S.atual.modo === 'lote' ? `${r.qtd} animais / ${fmt1(r.peso)} kg` : `${fmtBrinco(r.brinco)} / ${fmt1(r.peso)} kg`;
+    const desc = S.atual.modo === 'lote' ? `${r.qtd} animais / ${fmt1(r.peso)} kg` : `${descAnimal({ numero: r.numero, chip: r.brinco })} / ${fmt1(r.peso)} kg`;
     if (!confirm('Apagar o registro #' + (i + 1) + ' (' + desc + ')?')) return;
     S.atual.registros.splice(i, 1); S.dup = null; salvar(); atualizaEquip(); atualizaTotais();
   },
@@ -519,22 +659,29 @@ const acoes = {
 document.addEventListener('click', e => {
   const el = e.target.closest('[data-acao]');
   if (!el) return;
+  if (el.tagName === 'A') e.preventDefault();
   const fn = acoes[el.dataset.acao];
   if (fn) fn(el);
 });
 document.addEventListener('input', e => {
   if (e.target.id === 'inPeso') S.pesoEditado = e.target.value.trim() !== '';
+  if (e.target.id === 'bFaz') { S.fazBrincos = e.target.value; atualizaListaBrincos(); }
+  if (e.target.id === 'bBusca') { S.buscaBrincos = e.target.value; atualizaListaBrincos(); }
 });
-document.addEventListener('change', e => {
-  if (e.target.id === 'chkAuto') { S.auto = e.target.checked; localStorage.setItem('pref.auto', S.auto ? '1' : '0'); atualizaIndividual(); }
+document.addEventListener('keydown', e => {
+  if (e.key !== 'Enter') return;
+  if (e.target.id === 'inIdent') { e.preventDefault(); identDigitado(); }
+  if (e.target.id === 'fNumero') { e.preventDefault(); document.querySelector('[data-acao=numSalvar]')?.click(); }
 });
+
+setInterval(() => { if (S.tela === 'sessao') atualizaPeso(); }, 300);
 
 // Botão "voltar" do Android: fecha a folha ou volta ao início
 if (nativo) {
   import('@capacitor/app').then(({ App }) => {
     App.addListener('backButton', () => {
       if ($('sheet').classList.contains('on')) fecharFolha();
-      else if (S.tela === 'sessao') irInicio();
+      else if (S.tela !== 'inicio') irInicio();
       else App.minimizeApp();
     });
   }).catch(() => {});
