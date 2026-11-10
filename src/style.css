@@ -6,7 +6,7 @@
 *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
 html,body{height:100%;background:var(--verde-fundo)}
 body{font-family:system-ui,-apple-system,Roboto,sans-serif;color:var(--creme);
-  padding:calc(env(safe-area-inset-top) + 12px) 14px calc(env(safe-area-inset-bottom) + 14px);
+  padding:calc(env(safe-area-inset-top) + 12px) 14px calc(env(safe-area-inset-bottom) + 64px);
   -webkit-user-select:none;user-select:none}
 input{-webkit-user-select:text;user-select:text}
 #app{display:flex;flex-direction:column;gap:12px;max-width:560px;margin:0 auto;min-height:100%}
@@ -114,13 +114,13 @@ button{font-family:inherit;cursor:pointer}
 .sheet-bg{position:fixed;inset:0;background:rgba(0,0,0,.6);display:none;align-items:flex-end;justify-content:center;z-index:20}
 .sheet-bg.on{display:flex}
 .sheet{background:var(--verde-esc);border-top:2px solid var(--ouro);border-radius:20px 20px 0 0;width:100%;max-width:560px;
-  max-height:88vh;overflow-y:auto;padding:18px 16px calc(env(safe-area-inset-bottom) + 18px);display:flex;flex-direction:column;gap:12px}
+  max-height:88vh;overflow-y:auto;padding:18px 16px calc(env(safe-area-inset-bottom) + 64px);display:flex;flex-direction:column;gap:12px}
 .sheet h3{font-size:17px;color:var(--ouro)}
 .sheet p{font-size:13.5px;color:var(--sub);line-height:1.45}
 .dev-opt{display:flex;justify-content:space-between;align-items:center;padding:13px;border:1px solid var(--linha);border-radius:12px;background:rgba(255,255,255,.04);color:var(--creme);font-size:15px;text-align:left;width:100%}
 .dev-opt small{color:var(--sub);font-size:11.5px;display:block;margin-top:2px}
 
-.toast{position:fixed;left:50%;bottom:calc(env(safe-area-inset-bottom) + 24px);transform:translateX(-50%) translateY(150%);
+.toast{position:fixed;left:50%;bottom:calc(env(safe-area-inset-bottom) + 72px);transform:translateX(-50%) translateY(150%);
   background:#0d1d15;border:1px solid var(--ouro);color:var(--creme);padding:12px 18px;border-radius:12px;font-size:14px;
   transition:transform .25s,opacity .25s;z-index:30;max-width:90vw;text-align:center;opacity:0;visibility:hidden;pointer-events:none}
 .toast.on{transform:translateX(-50%) translateY(0);opacity:1;visibility:visible}
