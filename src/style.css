@@ -122,8 +122,8 @@ button{font-family:inherit;cursor:pointer}
 
 .toast{position:fixed;left:50%;bottom:calc(env(safe-area-inset-bottom) + 24px);transform:translateX(-50%) translateY(150%);
   background:#0d1d15;border:1px solid var(--ouro);color:var(--creme);padding:12px 18px;border-radius:12px;font-size:14px;
-  transition:transform .25s;z-index:30;max-width:90vw;text-align:center}
-.toast.on{transform:translateX(-50%) translateY(0)}
+  transition:transform .25s,opacity .25s;z-index:30;max-width:90vw;text-align:center;opacity:0;visibility:hidden;pointer-events:none}
+.toast.on{transform:translateX(-50%) translateY(0);opacity:1;visibility:visible}
 .flash{animation:flash .6s}
 @keyframes flash{0%{background:#3f8f5f}100%{background:var(--verde)}}
 .rodape{font-size:11px;color:var(--fraco);text-align:center;line-height:1.5;margin-top:auto;padding-top:6px}
