@@ -540,4 +540,13 @@ if (nativo) {
   }).catch(() => {});
 }
 
+// Simulação para testes no navegador (?sim): não afeta o app no celular
+if (!nativo && new URLSearchParams(location.search).has('sim')) {
+  window.__sim = {
+    peso: kg => { balanca.estado = 'conectado'; balanca.id = 'sim'; balanca.onPeso(kg); atualizaEquip(); },
+    brinco: linha => { bastao.estado = 'conectado'; bastao.endereco = 'sim'; bastao.split.push(linha + '\r\n'); atualizaEquip(); },
+    estado: () => S
+  };
+}
+
 render();
